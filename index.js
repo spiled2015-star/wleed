@@ -557,4 +557,4 @@ client.on('interactionCreate', async interaction => {
 });
 
 // حط التوكن حقك هنا
-client.login('');
+client.login(process.env.TOKEN);
