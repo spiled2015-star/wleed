@@ -1,18 +1,20 @@
-const { Client, GatewayIntentBits, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
+const { Client, GatewayIntentBits, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ChannelType, PermissionFlagsBits, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, AuditLogEvent } = require('discord.js');
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildModeration,
+        GatewayIntentBits.GuildVoiceStates
     ]
 });
 
 // قاعدة بيانات التحذيرات المؤقتة في الذاكرة
 const warnings = {};
 
-// 🛡️ تعريف الرتب والآيديات المهمة
+// 🛡️ تعريف الرتب والآيديات المهمة ورومات السجلات (Logs)
 const ROLES = {
     fullAdmin: ['1567133107386318909', '1566920315014090762'],
     midStaff: ['1566918799242829864'],
@@ -21,10 +23,8 @@ const ROLES = {
     highAdminTicket: '1566920315014090762',
     generalStaffTicket: '1566830895439286272',
     
-    // روم استقبال التقديمات الإدارية
     staffAppChannel: '1568180452781592636',
 
-    // الرولات المخصصة لفتح وإغلاق التقديم
     appControlRoles: [
         '1567133107386318909',
         '1566921899223683132',
@@ -32,9 +32,35 @@ const ROLES = {
         '1566922377680654356'
     ],
 
-    // روم التحكم المخصص لفتح وإغلاق التقديم
-    appControlChannel: '1568032731340869735'
+    appControlChannel: '1568032731340869735',
+
+    // 📋 رومات السجلات (Logs Channels)
+    logs: {
+        ban: '1568551884845752402',
+        timeout: '1568551943276855317',
+        kick: '1568551995122524191',
+        unban: '1568552067050508378',
+        memberAdd: '1568552118002917447',
+        memberRemove: '1568552176505192521',
+        nicknameUpdate: '1568552247061774476',
+        roleAdd: '1568552274064703589',
+        roleRemove: '1568552329815392278',
+        messageDelete: '1568552383359877272',
+        bulkDelete: '1568558676313120768',
+        messageUpdate: '1568558756986359910',
+        channelCreate: '1568558937475915886',
+        channelUpdate: '1568558975186899065',
+        channelDelete: '1568559056011141312',
+        roleCreate: '1568559367312252959',
+        roleUpdate: '1566414661656587', // (تم تصحيحها لـ 1568566414661656587)
+        roleDelete: '1568566493011116133',
+        voiceMove: '1568566734489657434',
+        voiceDisconnect: '1568566856401420309'
+    }
 };
+
+// تصحيح آيدي تحديث الرتبة بدقة
+ROLES.logs.roleUpdate = '1568566414661656587';
 
 function hasRole(member, roleList) {
     if (!member) return false;
@@ -54,25 +80,268 @@ function canControlApps(member) {
     return hasRole(member, ROLES.appControlRoles);
 }
 
+// دالة مساعدة لإرسال السجلات بروم محدد
+async function sendLog(guild, channelId, embed) {
+    try {
+        const channel = await guild.channels.fetch(channelId).catch(() => null);
+        if (channel) {
+            await channel.send({ embeds: [embed] });
+        }
+    } catch (err) {
+        console.error('خطأ في إرسال السجل:', err);
+    }
+}
+
 client.once('ready', () => {
     console.log(`تم تسجيل الدخول بنجاح باسم ${client.user.tag}!`);
 });
+
+// ==========================================
+// 📋 نظام السجلات الشامل (Audit Logs & Events)
+// ==========================================
+
+// 1. دخول عضو
+client.on('guildMemberAdd', member => {
+    const embed = new EmbedBuilder()
+        .setTitle('📥 انضمام عضو جديد')
+        .setDescription(`العضو: ${member} (\`${member.user.tag}\`)`)
+        .setColor('#2ecc71')
+        .setTimestamp();
+    sendLog(member.guild, ROLES.logs.memberAdd, embed);
+});
+
+// 2. خروج عضو
+client.on('guildMemberRemove', member => {
+    const embed = new EmbedBuilder()
+        .setTitle('📤 مغادرة عضو')
+        .setDescription(`العضو: \`${member.user.tag}\``)
+        .setColor('#e74c3c')
+        .setTimestamp();
+    sendLog(member.guild, ROLES.logs.memberRemove, embed);
+});
+
+// 3. تعديل النيك نيم
+client.on('guildMemberUpdate', (oldMember, newMember) => {
+    if (oldMember.nickname !== newMember.nickname) {
+        const embed = new EmbedBuilder()
+            .setTitle('✏️ تحديث اللقب (Nickname)')
+            .setDescription(`العضو: ${newMember}\n**القديم:** \`${oldMember.nickname || oldMember.user.username}\`\n**الجديد:** \`${newMember.nickname || newMember.user.username}\``)
+            .setColor('#3498db')
+            .setTimestamp();
+        sendLog(newMember.guild, ROLES.logs.nicknameUpdate, embed);
+    }
+});
+
+// 4 & 5. إعطاء أو إزالة رتبة
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+    const addedRoles = newMember.roles.cache.filter(role => !oldMember.roles.cache.has(role.id));
+    const removedRoles = oldMember.roles.cache.filter(role => !newMember.roles.cache.has(role.id));
+
+    if (addedRoles.size > 0) {
+        const rolesStr = addedRoles.map(r => r.name).join(', ');
+        const embed = new EmbedBuilder()
+            .setTitle('➕🛡️ إعطاء رتبة لعضو')
+            .setDescription(`العضو: ${newMember}\n**الرتبة المضافة:** \`${rolesStr}\``)
+            .setColor('#2ecc71')
+            .setTimestamp();
+        sendLog(newMember.guild, ROLES.logs.roleAdd, embed);
+    }
+
+    if (removedRoles.size > 0) {
+        const rolesStr = removedRoles.map(r => r.name).join(', ');
+        const embed = new EmbedBuilder()
+            .setTitle('➖🛡️ إزالة رتبة من عضو')
+            .setDescription(`العضو: ${newMember}\n**الرتبة المزالة:** \`${rolesStr}\``)
+            .setColor('#e74c3c')
+            .setTimestamp();
+        sendLog(newMember.guild, ROLES.logs.roleRemove, embed);
+    }
+});
+
+// 6. حذف رسالة
+client.on('messageDelete', message => {
+    if (!message.guild || message.author?.bot) return;
+    const embed = new EmbedBuilder()
+        .setTitle('🗑️ حذف رسالة')
+        .setDescription(`الكاتب: ${message.author}\nالروم: ${message.channel}\n**المحتوى:**\n${message.content || '*[رسالة فارغة أو تحتوي على وسائط]*'}`)
+        .setColor('#e74c3c')
+        .setTimestamp();
+    sendLog(message.guild, ROLES.logs.messageDelete, embed);
+});
+
+// 7. حذف دفعة رسائل (Bulk Delete)
+client.on('messageDeleteBulk', messages => {
+    const firstMsg = messages.first();
+    if (!firstMsg || !firstMsg.guild) return;
+    const embed = new EmbedBuilder()
+        .setTitle('🗑️📦 حذف دفعة رسائل')
+        .setDescription(`تم حذف **${messages.size}** رسالة في الروم ${firstMsg.channel}`)
+        .setColor('#e74c3c')
+        .setTimestamp();
+    sendLog(firstMsg.guild, ROLES.logs.bulkDelete, embed);
+});
+
+// 8. تعديل رسالة
+client.on('messageUpdate', (oldMessage, newMessage) => {
+    if (!newMessage.guild || newMessage.author?.bot || oldMessage.content === newMessage.content) return;
+    const embed = new EmbedBuilder()
+        .setTitle('✏️💬 تعديل رسالة')
+        .setDescription(`الكاتب: ${newMessage.author}\nالروم: ${newMessage.channel}\n**قبل التعديل:**\n${oldMessage.content || '*[فارغ]*'}\n\n**بعد التعديل:**\n${newMessage.content || '*[فارغ]*'}`)
+        .setColor('#f1c40f')
+        .setTimestamp();
+    sendLog(newMessage.guild, ROLES.logs.messageUpdate, embed);
+});
+
+// 9. إنشاء روم
+client.on('channelCreate', channel => {
+    if (!channel.guild) return;
+    const embed = new EmbedBuilder()
+        .setTitle('➕📢 إنشاء روم جديد')
+        .setDescription(`الروم: ${channel} (\`${channel.name}\`)\nالنوع: \`${channel.type}\``)
+        .setColor('#2ecc71')
+        .setTimestamp();
+    sendLog(channel.guild, ROLES.logs.channelCreate, embed);
+});
+
+// 10. تعديل روم أو صلاحياته
+client.on('channelUpdate', (oldChannel, newChannel) => {
+    if (!newChannel.guild) return;
+    const embed = new EmbedBuilder()
+        .setTitle('⚙️📢 تعديل روم أو صلاحيات')
+        .setDescription(`الروم: ${newChannel} (\`${newChannel.name}\`)`)
+        .setColor('#3498db')
+        .setTimestamp();
+    sendLog(newChannel.guild, ROLES.logs.channelUpdate, embed);
+});
+
+// 11. حذف روم
+client.on('channelDelete', channel => {
+    if (!channel.guild) return;
+    const embed = new EmbedBuilder()
+        .setTitle('❌📢 حذف روم')
+        .setDescription(`اسم الروم المحذوف: \`${channel.name}\``)
+        .setColor('#e74c3c')
+        .setTimestamp();
+    sendLog(channel.guild, ROLES.logs.channelDelete, embed);
+});
+
+// 12. إنشاء رتبة
+client.on('roleCreate', role => {
+    const embed = new EmbedBuilder()
+        .setTitle('➕🛡️ إنشاء رتبة جديدة')
+        .setDescription(`الرتبة: ${role} (\`${role.name}\`)`)
+        .setColor('#2ecc71')
+        .setTimestamp();
+    sendLog(role.guild, ROLES.logs.roleCreate, embed);
+});
+
+// 13. تعديل رتبة
+client.on('roleUpdate', (oldRole, newRole) => {
+    const embed = new EmbedBuilder()
+        .setTitle('⚙️🛡️ تعديل رتبة')
+        .setDescription(`الرتبة: ${newRole} (\`${newRole.name}\`)`)
+        .setColor('#3498db')
+        .setTimestamp();
+    sendLog(newRole.guild, ROLES.logs.roleUpdate, embed);
+});
+
+// 14. حذف رتبة
+client.on('roleDelete', role => {
+    const embed = new EmbedBuilder()
+        .setTitle('❌🛡️ حذف رتبة')
+        .setDescription(`اسم الرتبة المحذوفة: \`${role.name}\``)
+        .setColor('#e74c3c')
+        .setTimestamp();
+    sendLog(role.guild, ROLES.logs.roleDelete, embed);
+});
+
+// 15, 16 & 17. أحداث البان، الكيك، التايم آウト، والفك عن البان (عبر Audit Logs)
+client.on('guildAuditLogEntryCreate', async (entry, guild) => {
+    const { action, executor, target } = entry;
+
+    if (action === AuditLogEvent.MemberBanAdd) {
+        const embed = new EmbedBuilder()
+            .setTitle('🔨 حظر عضو (Ban)')
+            .setDescription(`العضو: \`${target?.tag || 'غير معروف'}\`\nبواسطة المشرف: ${executor}`)
+            .setColor('#e74c3c')
+            .setTimestamp();
+        sendLog(guild, ROLES.logs.ban, embed);
+    }
+
+    if (action === AuditLogEvent.MemberBanRemove) {
+        const embed = new EmbedBuilder()
+            .setTitle('🔓 إزالة الحظر (Unban)')
+            .setDescription(`العضو: \`${target?.tag || 'غير معروف'}\`\nبواسطة المشرف: ${executor}`)
+            .setColor('#2ecc71')
+            .setTimestamp();
+        sendLog(guild, ROLES.logs.unban, embed);
+    }
+
+    if (action === AuditLogEvent.MemberKick) {
+        const embed = new EmbedBuilder()
+            .setTitle('👢 طرد عضو (Kick)')
+            .setDescription(`العضو: \`${target?.tag || 'غير معروف'}\`\nبواسطة المشرف: ${executor}`)
+            .setColor('#e74c3c')
+            .setTimestamp();
+        sendLog(guild, ROLES.logs.kick, embed);
+    }
+
+    if (action === AuditLogEvent.MemberUpdate) {
+        // التحقق من التايم آウト (CommunicationDisabledUntil)
+        const typedTarget = target;
+        if (entry.changes?.some(c => c.key === 'communication_disabled_until')) {
+            const embed = new EmbedBuilder()
+                .setTitle('⏳ إعطاء تايم آウト (Timeout)')
+                .setDescription(`العضو: <@${typedTarget?.id}>\nبواسطة المشرف: ${executor}`)
+                .setColor('#f1c40f')
+                .setTimestamp();
+            sendLog(guild, ROLES.logs.timeout, embed);
+        }
+    }
+});
+
+// 18 & 19. السجلات الصوتية (نقل صوتي أو خروج/ديسكونت)
+client.on('voiceStateUpdate', (oldState, newState) => {
+    const member = newState.member;
+    if (!member) return;
+
+    // ديسكونت أو خروج من الصوت
+    if (oldState.channelId && !newState.channelId) {
+        const embed = new EmbedBuilder()
+            .setTitle('🔌 خروج من الروم الصوتي (Disconnect)')
+            .setDescription(`العضو: ${member} خرج من روم: \`${oldState.channel.name}\``)
+            .setColor('#e74c3c')
+            .setTimestamp();
+        sendLog(member.guild, ROLES.logs.voiceDisconnect, embed);
+    }
+
+    // نقل صوتي من روم لآخر
+    if (oldState.channelId && newState.channelId && oldState.channelId !== newState.channelId) {
+        const embed = new EmbedBuilder()
+            .setTitle('🔊 نقل صوتي (Voice Move)')
+            .setDescription(`العضو: ${member}\nمن روم: \`${oldState.channel.name}\`\nإلى روم: \`${newState.channel.name}\``)
+            .setColor('#3498db')
+            .setTimestamp();
+        sendLog(member.guild, ROLES.logs.voiceMove, embed);
+    }
+});
+
+
+// ==========================================
+// الأوامر النصية وتفاعلات الأزرار والتذاكر
+// ==========================================
 
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
     const content = message.content.trim();
 
-    // ==========================================
-    // 0. نظام التحكم في فتح وإغلاق التقديم (روم مخصص + رولات مخصصة)
-    // ==========================================
+    // 0. نظام التحكم في فتح وإغلاق التقديم
     if (content === 'فتح تقديم الادارة' || content === 'قفل تقديم الادارة') {
-        // التحقق أن الكتابة تمت في الروم المخصص فقط
         if (message.channel.id === ROLES.appControlChannel) {
-            // التحقق من الرولات المخولة
             if (canControlApps(message.member)) {
                 try {
-                    await message.delete().catch(() => {}); // حذف رسالة الكاتب تلقائياً
+                    await message.delete().catch(() => {});
 
                     if (content === 'فتح تقديم الادارة') {
                         const openEmbed = new EmbedBuilder()
@@ -80,12 +349,12 @@ client.on('messageCreate', async message => {
                             .setDescription('**أيها الأعضاء الأفاضل، تم فتح باب التقديم للانضمام إلى طاقم الإدارة!**\n\nإذا كنت ترى في نفسك الكفاءة، توجه واكتب أمر تقديم أو اضغط على الأزرار المخصصة للتقديم. بالتوفيق للجميع! ✨')
                             .setColor('#2ecc71')
                             .setTimestamp();
-                        
+                    
                         await message.channel.send({ embeds: [openEmbed] });
                     } else if (content === 'قفل تقديم الادارة') {
                         const closeEmbed = new EmbedBuilder()
                             .setTitle('🔴 إغلاق التقديم الإداري - سيرفر whoyousun')
-                            .setDescription('**عُرِضت ونُظِّرت الطلبات، وتم إغلاق باب التقديم الإداري في الوقت الحالي.**\n\nنعتذر لمن تم رفض طلبهم، ونتمنى الحظ الأوفر للجميع في المرات القادمة.')
+                            .setDescription('**عُرِضت ونُظِّرت الطلبات، وتم إغلاق باب التقديم الإداري في الوقت الحالي.**\n\nنعتذر لمن تم رفض طلبهم، ونتمنى الحظ الأوفر للجميع في المرات القادمة.')
                             .setColor('#e74c3c')
                             .setTimestamp();
 
@@ -101,14 +370,25 @@ client.on('messageCreate', async message => {
         return;
     }
 
-    // ==========================================
-    // 1. نظام الرد التلقائي وسوالف البوت "الطفشان"
-    // ==========================================
+    // 1. نظام الرد التلقائي وسوالف البوت
     if (content.includes('السلام عليكم') || content.includes('سلام عليكم') || content.includes('مرحبا')) {
         return message.reply(`𝔴𝔥𝔬𝔶𝔬𝔲𝔰𝔲𝔫- وعليكم السلام... خير، وش عندك جاي تسايرني؟ خلصنا 😒`);
     }
 
     if (content === 'منشن امونق') {
+        const allowedUsers = [
+            '1566833802527899750',
+            '1566918799242829864',
+            '1566920315014090762',
+            '1567133107386318909'
+        ];
+
+        const isAllowed = allowedUsers.includes(message.author.id) || message.member.permissions.has(PermissionFlagsBits.Administrator);
+
+        if (!isAllowed) {
+            return message.reply({ content: '❌ عذراً، أمر "منشن امونق" مخصص للأشخاص المصرح لهم فقط!', ephemeral: true });
+        }
+
         return message.channel.send(`# **منشن امونق صار**\n\n@everyone @here\n\nhttps://discord.com/channels/1564728682134900859/1568267973528002761`);
     }
 
@@ -127,9 +407,7 @@ client.on('messageCreate', async message => {
         return message.reply(replies[Math.floor(Math.random() * replies.length)]);
     }
 
-    // ==========================================
     // 2. أمر التكتات
-    // ==========================================
     if (content === '!تكت') {
         const embed = new EmbedBuilder()
             .setTitle('🎫 نظام التذاكر والدعم الفني')
@@ -190,9 +468,7 @@ client.on('messageCreate', async message => {
         }
     }
 
-    // ==========================================
-    // 5. نظام المشرفين والصلاحيات المخصصة
-    // ==========================================
+    // 5. نظام المشرفين والتحذيرات
     if (content.startsWith('!تحذير')) {
         if (!canModerate(message.member)) {
             return message.reply({ content: '❌ عذراً، لا تمتلك صلاحية تحذير الأعضاء.' });
@@ -226,7 +502,7 @@ client.on('messageCreate', async message => {
 
         if (totalWarnings >= 3) {
             try {
-                await target.timeout(60 * 60 * 1000, 'تجاوز الحد الأقصى للتحذيرات (3 تحذيرات)');
+                await target.timeout(60 * 60 * 1000, 'تجاوز الحد الأقص للتحذيرات (3 تحذيرات)');
                 replyText += `\n🚨 **تم إعطاء العضو تايم آウト (Timeout) تلقائي لمدة ساعة لتجاوز 3 تحذيرات!**`;
             } catch (err) {}
         }
@@ -308,7 +584,7 @@ client.on('messageCreate', async message => {
 
     if (content.startsWith('!كيك') || content.startsWith('!هش')) {
         if (!canKickOrBan(message.member)) {
-            return message.reply({ content: '❌ عذراً، هذا الأمر (الكيك) مخصص للإدارة العليا فقط!' });
+            return message.reply({ content: '❌ عذراً، هذا الأمر مخصص للإدارة العليا فقط!' });
         }
 
         const args = content.split(' ').slice(1);
@@ -328,7 +604,7 @@ client.on('messageCreate', async message => {
 
     if (content.startsWith('!بان') || content.startsWith('!تف')) {
         if (!canKickOrBan(message.member)) {
-            return message.reply({ content: '❌ عذراً، هذا الأمر (الباند) مخصص للإدارة العليا فقط!' });
+            return message.reply({ content: '❌ عذراً، هذا الأمر مخصص للإدارة العليا فقط!' });
         }
 
         const args = content.split(' ').slice(1);
@@ -350,7 +626,6 @@ client.on('messageCreate', async message => {
 // التعامل مع التفاعلات (الأزرار، القوائم، النوافذ)
 client.on('interactionCreate', async interaction => {
     
-    // 1. تفاعل القائمة المنسدلة للتكتات
     if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_menu') {
         const selectedValue = interaction.values[0];
         const modal = new ModalBuilder()
@@ -368,7 +643,6 @@ client.on('interactionCreate', async interaction => {
         await interaction.showModal(modal);
     }
 
-    // 2. زر التقديم على الإدارة
     if (interaction.isButton() && interaction.customId === 'open_staff_application') {
         const modal = new ModalBuilder()
             .setCustomId('staff_app_modal')
@@ -391,7 +665,6 @@ client.on('interactionCreate', async interaction => {
         await interaction.showModal(modal);
     }
 
-    // 3. استقبال نموذج التقديم وإرساله إلى روم التقديمات المحدد
     if (interaction.isModalSubmit() && interaction.customId === 'staff_app_modal') {
         const name = interaction.fields.getTextInputValue('app_q1');
         const age = interaction.fields.getTextInputValue('app_q2');
@@ -414,7 +687,6 @@ client.on('interactionCreate', async interaction => {
             .setColor('#00FF00')
             .setTimestamp();
 
-        // أزرار القبول والرفض مع إرفاق آيدي المتقدم داخل الـ customId
         const appRow = new ActionRowBuilder()
             .addComponents(
                 new ButtonBuilder().setCustomId(`accept_app_${member.id}`).setLabel('قبول الطلب').setStyle(ButtonStyle.Success).setEmoji('✅'),
@@ -423,7 +695,6 @@ client.on('interactionCreate', async interaction => {
 
         await interaction.reply({ content: '✅ تم إرسال تقديمك بنجاح للإدارة! وصلى الله على نبينا محمد.', ephemeral: true });
 
-        // إرسال التقديم للروم المخصص 1568180452781592636
         try {
             const targetChannel = await interaction.guild.channels.fetch(ROLES.staffAppChannel);
             if (targetChannel) {
@@ -434,7 +705,6 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // 4. معالجة أزرار قبول أو رفض التقديم الإداري
     if (interaction.isButton() && (interaction.customId.startsWith('accept_app_') || interaction.customId.startsWith('reject_app_'))) {
         if (!canModerate(interaction.member)) {
             return interaction.reply({ content: '❌ عذراً، الأزرار مخصصة للمشرفين فقط!', ephemeral: true });
@@ -447,13 +717,11 @@ client.on('interactionCreate', async interaction => {
             const targetUser = await interaction.guild.members.fetch(targetUserId);
             
             if (isAccept) {
-                // رسالة القبول للخاص
                 await targetUser.send({
                     content: `🎉 **مبروك! تم الموافقة على كونك إداري في سيرفر whoyousun.**\n⚠️ **تنبيه:** لا تفتح تذكرة أبداً إلا بعد أن يتم الإعلان رسمياً في روم المقبولين!`
                 });
                 await interaction.update({ content: `✅ تم قبول العضو ${targetUser} وإرسال رسالة القبول لخاصه.`, components: [] });
             } else {
-                // رسالة الرفض للخاص
                 await targetUser.send({
                     content: `❌ عذراً، تم رفض طلبك كإداري في سيرفر whoyousun. نتمنى لك حظاً أوفر في المرات القادمة.`
                 });
@@ -465,7 +733,6 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // 5. إنشاء التكت بعد كتابة السبب
     if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_ticket_')) {
         const ticketType = interaction.customId.replace('modal_', '');
         const reason = interaction.fields.getTextInputValue('ticket_reason');
@@ -521,7 +788,6 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // 6. أزرار تحكم المشرفين داخل التكت
     if (interaction.isButton()) {
         const channel = interaction.channel;
         const member = interaction.member;
@@ -543,7 +809,7 @@ client.on('interactionCreate', async interaction => {
                 await channel.permissionOverwrites.edit(roleId, { SendMessages: true });
                 await interaction.reply({ content: `🔓 تم ترك التكت بواسطة المشرف ${member}.` });
             } catch (err) {
-                await interaction.reply({ content: '❌ حدث خطأ.', ephemeral: true });ر
+                await interaction.reply({ content: '❌ حدث خطأ.', ephemeral: true });
             }
         }
 
@@ -556,5 +822,5 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// حط التوكن حقك هنا
+// تسجيل الدخول الآمن
 client.login(process.env.TOKEN);
